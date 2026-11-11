@@ -5,58 +5,6 @@
 @import AVFoundation;
 @import AudioToolbox;
 
-struct my_mach_header_64 {
-    uint32_t magic;
-    int32_t cputype;
-    int32_t cpusubtype;
-    uint32_t filetype;
-    uint32_t ncmds;
-    uint32_t sizeofcmds;
-    uint32_t flags;
-    uint32_t reserved;
-};
-
-struct my_load_command {
-    uint32_t cmd;
-    uint32_t cmdsize;
-};
-
-struct my_segment_command_64 {
-    uint32_t cmd;
-    uint32_t cmdsize;
-    char segname[16];
-    uint64_t vmaddr;
-    uint64_t vmsize;
-    uint64_t fileoff;
-    uint64_t filesize;
-    int32_t maxprot;
-    int32_t initprot;
-    uint32_t nsects;
-    uint32_t flags;
-};
-
-struct my_section_64 {
-    char sectname[16];
-    char segname[16];
-    uint64_t addr;
-    uint64_t size;
-    uint32_t offset;
-    uint32_t align;
-    uint32_t reloff;
-    uint32_t nreloc;
-    uint32_t flags;
-    uint32_t reserved1;
-    uint32_t reserved2;
-    uint32_t reserved3;
-};
-
-extern uint32_t _dyld_image_count(void);
-extern const struct my_mach_header_64 *_dyld_get_image_header(uint32_t image_index);
-extern intptr_t _dyld_get_image_vmaddr_slide(uint32_t image_index);
-extern const char *_dyld_get_image_name(uint32_t image_index);
-extern unsigned int mach_task_self(void);
-extern int vm_protect(unsigned int target_task, uintptr_t address, uintptr_t size, int set_maximum, int new_protection);
-
 static BOOL gEchoEnabled = NO;
 static float gParamEcho = 0.85f;
 static float gParamGain = 0.50f;
@@ -156,49 +104,6 @@ __attribute__((used, section("__DATA,__interpose")))
 static const InterposeTuple interpose_audio[] = {
     { (const void *)hook_AudioUnitRender, (const void *)AudioUnitRender }
 };
-
-static void hookGotPointers(void) {
-    void *origFunc = (void *)AudioUnitRender;
-    void *hookFunc = (void *)hook_AudioUnitRender;
-    uint32_t count = _dyld_image_count();
-
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (!name) continue;
-        if (!strstr(name, ".app/") || strstr(name, "MenuDiscord")) continue;
-
-        const struct my_mach_header_64 *header = _dyld_get_image_header(i);
-        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-        if (!header || header->magic != 0xfeedfacf) continue;
-
-        uintptr_t cur = (uintptr_t)header + sizeof(struct my_mach_header_64);
-        for (uint32_t c = 0; c < header->ncmds; c++) {
-            struct my_load_command *lc = (struct my_load_command *)cur;
-            if (lc->cmd == 0x19) {
-                struct my_segment_command_64 *seg = (struct my_segment_command_64 *)cur;
-                if (strncmp(seg->segname, "__DATA", 6) == 0) {
-                    struct my_section_64 *sec = (struct my_section_64 *)(cur + sizeof(struct my_segment_command_64));
-                    for (uint32_t s = 0; s < seg->nsects; s++) {
-                        if (strncmp(sec[s].sectname, "__got", 5) == 0 || strncmp(sec[s].sectname, "__la_symbol_ptr", 15) == 0) {
-                            uintptr_t addr = (uintptr_t)(sec[s].addr + slide);
-                            uintptr_t size = (uintptr_t)sec[s].size;
-                            if (vm_protect(mach_task_self(), addr, size, 0, 19) == 0) {
-                                void **ptrs = (void **)addr;
-                                uintptr_t num = size / sizeof(void *);
-                                for (uintptr_t k = 0; k < num; k++) {
-                                    if (ptrs[k] == origFunc) {
-                                        ptrs[k] = hookFunc;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            cur += lc->cmdsize;
-        }
-    }
-}
 
 static NSData *buildProcessedWavData(void) {
     if (gTestRecordCount <= 0) return nil;
@@ -316,8 +221,6 @@ static NSData *buildProcessedWavData(void) {
 }
 
 - (void)setup {
-    hookGotPointers();
-
     UIWindow *win = nil;
     for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (scene.activationState == UISceneActivationStateForegroundActive) {
@@ -874,7 +777,6 @@ static NSData *buildProcessedWavData(void) {
 
 __attribute__((constructor))
 static void startMenu() {
-    hookGotPointers();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[DiscordMenu shared] setup];
     });
