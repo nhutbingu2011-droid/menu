@@ -5,83 +5,158 @@
 @import AVFoundation;
 @import AudioToolbox;
 
+struct my_mach_header_64 {
+    uint32_t magic;
+    int32_t cputype;
+    int32_t cpusubtype;
+    uint32_t filetype;
+    uint32_t ncmds;
+    uint32_t sizeofcmds;
+    uint32_t flags;
+    uint32_t reserved;
+};
+
+struct my_load_command {
+    uint32_t cmd;
+    uint32_t cmdsize;
+};
+
+struct my_segment_command_64 {
+    uint32_t cmd;
+    uint32_t cmdsize;
+    char segname[16];
+    uint64_t vmaddr;
+    uint64_t vmsize;
+    uint64_t fileoff;
+    uint64_t filesize;
+    int32_t maxprot;
+    int32_t initprot;
+    uint32_t nsects;
+    uint32_t flags;
+};
+
+struct my_section_64 {
+    char sectname[16];
+    char segname[16];
+    uint64_t addr;
+    uint64_t size;
+    uint32_t offset;
+    uint32_t align;
+    uint32_t reloff;
+    uint32_t nreloc;
+    uint32_t flags;
+    uint32_t reserved1;
+    uint32_t reserved2;
+    uint32_t reserved3;
+};
+
+struct my_symtab_command {
+    uint32_t cmd;
+    uint32_t cmdsize;
+    uint32_t symoff;
+    uint32_t nsyms;
+    uint32_t stroff;
+    uint32_t strsize;
+};
+
+struct my_dysymtab_command {
+    uint32_t cmd;
+    uint32_t cmdsize;
+    uint32_t ilocalsym;
+    uint32_t nlocalsym;
+    uint32_t iextdefsym;
+    uint32_t nextdefsym;
+    uint32_t iundefsym;
+    uint32_t nundefsym;
+    uint32_t tocoff;
+    uint32_t ntoc;
+    uint32_t modtaboff;
+    uint32_t nmodtab;
+    uint32_t extrefsymoff;
+    uint32_t nextrefsyms;
+    uint32_t indirectsymoff;
+    uint32_t nindirectsyms;
+    uint32_t exprelocoff;
+    uint32_t nlocreloc;
+    uint32_t locrelocoff;
+};
+
+struct my_nlist_64 {
+    uint32_t n_strx;
+    uint8_t n_type;
+    uint8_t n_sect;
+    uint16_t n_desc;
+    uint64_t n_value;
+};
+
+extern uint32_t _dyld_image_count(void);
+extern const struct my_mach_header_64 *_dyld_get_image_header(uint32_t image_index);
+extern intptr_t _dyld_get_image_vmaddr_slide(uint32_t image_index);
+extern const char *_dyld_get_image_name(uint32_t image_index);
+extern unsigned int mach_task_self_;
+extern int vm_protect(unsigned int target_task, uintptr_t address, uintptr_t size, int set_maximum, int new_protection);
+
 static BOOL gEchoEnabled = NO;
-static float gParamEcho = 0.85f;
-static float gParamGain = 0.50f;
+static float gParamEcho = 0.50f;
+static float gParamGain = 0.25f;
 static BOOL gLongNganEnabled = YES;
-static float gParamBass = 0.60f;
+static float gParamBass = 0.30f;
 
 static float gEchoBuffer[48000];
 static int gEchoWritePos = 0;
-static float gLowPassState = 0.0f;
+static float gBassLP = 0.0f;
+static float gEchoDampLP = 0.0f;
 
-static BOOL gIsRecordingTest = NO;
-static int16_t gTestRecordBuffer[480000];
-static int gTestRecordCount = 0;
+static float cleanStudioSample(float x) {
+    float echoMix = gParamEcho * 0.85f;
+    float preGain = 1.0f + (gParamGain * 2.5f);
+    float bassGain = gParamBass * 1.4f;
+    float feedback = gLongNganEnabled ? 0.52f : 0.22f;
 
-static float applyWarSingleSample(float x, float *echoBuf, int *writePos, float *lpState) {
-    float echoMix = gParamEcho * 3.5f;
-    float warGain = 1.0f + (gParamGain * 19.0f);
-    float bassBoost = gParamBass * 12.0f;
-    float feedback = gLongNganEnabled ? 0.84f : 0.32f;
-    int delay1 = gLongNganEnabled ? 10500 : 5000;
-    int delay2 = gLongNganEnabled ? 19000 : 8500;
-    int delay3 = gLongNganEnabled ? 31000 : 12000;
+    int d1 = gLongNganEnabled ? 7200 : 4800;
+    int d2 = gLongNganEnabled ? 14400 : 9600;
+    int d3 = gLongNganEnabled ? 21600 : 14400;
 
-    *lpState = *lpState + 0.11f * (x - *lpState);
-    float voice = x + ((*lpState) * bassBoost);
+    gBassLP = gBassLP + 0.045f * (x - gBassLP);
+    float warmVoice = x + (gBassLP * bassGain);
 
-    int wp = *writePos;
-    int r1 = (wp + 48000 - delay1) % 48000;
-    int r2 = (wp + 48000 - delay2) % 48000;
-    int r3 = (wp + 48000 - delay3) % 48000;
-    float delayed = echoBuf[r1] * 0.68f + echoBuf[r2] * 0.48f + echoBuf[r3] * 0.34f;
+    int wp = gEchoWritePos;
+    int r1 = (wp + 48000 - d1) % 48000;
+    int r2 = (wp + 48000 - d2) % 48000;
+    int r3 = (wp + 48000 - d3) % 48000;
 
-    float fb = voice + delayed * feedback;
-    if (fb > 1.0f) fb = 1.0f;
-    if (fb < -1.0f) fb = -1.0f;
-    echoBuf[wp] = fb;
-    *writePos = (wp + 1) % 48000;
+    float rawEcho = gEchoBuffer[r1] * 0.50f + gEchoBuffer[r2] * 0.30f + gEchoBuffer[r3] * 0.15f;
+    gEchoDampLP = gEchoDampLP + 0.35f * (rawEcho - gEchoDampLP);
 
-    float out = (voice + delayed * echoMix) * warGain;
-    if (out > 0.99f) out = 0.99f;
-    if (out < -0.99f) out = -0.99f;
-    return out;
+    float nextBuf = x * 0.85f + gEchoDampLP * feedback;
+    nextBuf = tanhf(nextBuf);
+    gEchoBuffer[wp] = nextBuf;
+    gEchoWritePos = (wp + 1) % 48000;
+
+    float combined = (warmVoice + gEchoDampLP * echoMix) * preGain;
+    return tanhf(combined);
 }
 
 static void processMicEcho(AudioBufferList *ioData, UInt32 inNumberFrames) {
-    if (!ioData || ioData->mNumberBuffers == 0 || inNumberFrames == 0) return;
+    if (!gEchoEnabled || !ioData || ioData->mNumberBuffers == 0 || inNumberFrames == 0) return;
 
-    AudioBuffer *buf = &ioData->mBuffers[0];
-    if (!buf->mData || buf->mDataByteSize == 0) return;
+    for (UInt32 b = 0; b < ioData->mNumberBuffers; b++) {
+        AudioBuffer *buf = &ioData->mBuffers[b];
+        if (!buf->mData || buf->mDataByteSize == 0) continue;
 
-    UInt32 bytesPerFrame = buf->mDataByteSize / inNumberFrames;
+        UInt32 bytesPerFrame = buf->mDataByteSize / inNumberFrames;
 
-    if (bytesPerFrame == 2) {
-        int16_t *samples = (int16_t *)buf->mData;
-        for (UInt32 i = 0; i < inNumberFrames; i++) {
-            int16_t raw = samples[i];
-            if (gIsRecordingTest && gTestRecordCount < 480000) {
-                gTestRecordBuffer[gTestRecordCount++] = raw;
+        if (bytesPerFrame == 2) {
+            int16_t *samples = (int16_t *)buf->mData;
+            for (UInt32 i = 0; i < inNumberFrames; i++) {
+                float x = (float)samples[i] / 32768.0f;
+                float out = cleanStudioSample(x);
+                samples[i] = (int16_t)(out * 32760.0f);
             }
-            if (gEchoEnabled) {
-                float x = (float)raw / 32768.0f;
-                float out = applyWarSingleSample(x, gEchoBuffer, &gEchoWritePos, &gLowPassState);
-                samples[i] = (int16_t)(out * 32767.0f);
-            }
-        }
-    } else if (bytesPerFrame == 4) {
-        float *samples = (float *)buf->mData;
-        for (UInt32 i = 0; i < inNumberFrames; i++) {
-            float rawF = samples[i];
-            if (gIsRecordingTest && gTestRecordCount < 480000) {
-                float clamped = rawF;
-                if (clamped > 1.0f) clamped = 1.0f;
-                if (clamped < -1.0f) clamped = -1.0f;
-                gTestRecordBuffer[gTestRecordCount++] = (int16_t)(clamped * 32767.0f);
-            }
-            if (gEchoEnabled) {
-                samples[i] = applyWarSingleSample(rawF, gEchoBuffer, &gEchoWritePos, &gLowPassState);
+        } else if (bytesPerFrame == 4) {
+            float *samples = (float *)buf->mData;
+            for (UInt32 i = 0; i < inNumberFrames; i++) {
+                samples[i] = cleanStudioSample(samples[i]);
             }
         }
     }
@@ -89,7 +164,7 @@ static void processMicEcho(AudioBufferList *ioData, UInt32 inNumberFrames) {
 
 static OSStatus hook_AudioUnitRender(AudioUnit inUnit, AudioUnitRenderActionFlags *ioActionFlags, const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber, UInt32 inNumberFrames, AudioBufferList *ioData) {
     OSStatus status = AudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inBusNumber, inNumberFrames, ioData);
-    if (status == noErr && inBusNumber == 1 && (gEchoEnabled || gIsRecordingTest)) {
+    if (status == noErr && inBusNumber == 1 && gEchoEnabled) {
         processMicEcho(ioData, inNumberFrames);
     }
     return status;
@@ -105,58 +180,94 @@ static const InterposeTuple interpose_audio[] = {
     { (const void *)hook_AudioUnitRender, (const void *)AudioUnitRender }
 };
 
-static NSData *buildProcessedWavData(void) {
-    if (gTestRecordCount <= 0) return nil;
-    int tailSamples = 48000;
-    int totalSamples = gTestRecordCount + tailSamples;
-    int16_t *outPcm = (int16_t *)calloc(totalSamples, sizeof(int16_t));
-    float *tempEcho = (float *)calloc(48000, sizeof(float));
-    if (!outPcm || !tempEcho) {
-        if (outPcm) free(outPcm);
-        if (tempEcho) free(tempEcho);
-        return nil;
+static void hookGotPointers(void) {
+    uintptr_t origAddr = ((uintptr_t)AudioUnitRender) & 0x0000007fffffffffULL;
+    void *hookFunc = (void *)hook_AudioUnitRender;
+    uint32_t count = _dyld_image_count();
+
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name) continue;
+        if (!strstr(name, ".app/") || strstr(name, "MenuDiscord")) continue;
+
+        const struct my_mach_header_64 *header = _dyld_get_image_header(i);
+        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+        if (!header || header->magic != 0xfeedfacf) continue;
+
+        struct my_segment_command_64 *linkedit_seg = NULL;
+        struct my_symtab_command *symtab_cmd = NULL;
+        struct my_dysymtab_command *dysymtab_cmd = NULL;
+
+        uintptr_t cur = (uintptr_t)header + sizeof(struct my_mach_header_64);
+        for (uint32_t c = 0; c < header->ncmds; c++) {
+            struct my_load_command *lc = (struct my_load_command *)cur;
+            if (lc->cmd == 0x19) {
+                struct my_segment_command_64 *seg = (struct my_segment_command_64 *)cur;
+                if (strcmp(seg->segname, "__LINKEDIT") == 0) {
+                    linkedit_seg = seg;
+                }
+            } else if (lc->cmd == 0x2) {
+                symtab_cmd = (struct my_symtab_command *)cur;
+            } else if (lc->cmd == 0xb) {
+                dysymtab_cmd = (struct my_dysymtab_command *)cur;
+            }
+            cur += lc->cmdsize;
+        }
+
+        struct my_nlist_64 *symtab = NULL;
+        const char *strtab = NULL;
+        uint32_t *indirect_symtab = NULL;
+
+        if (linkedit_seg && symtab_cmd && dysymtab_cmd) {
+            uintptr_t linkedit_base = (uintptr_t)slide + (uintptr_t)(linkedit_seg->vmaddr - linkedit_seg->fileoff);
+            symtab = (struct my_nlist_64 *)(linkedit_base + symtab_cmd->symoff);
+            strtab = (const char *)(linkedit_base + symtab_cmd->stroff);
+            indirect_symtab = (uint32_t *)(linkedit_base + dysymtab_cmd->indirectsymoff);
+        }
+
+        cur = (uintptr_t)header + sizeof(struct my_mach_header_64);
+        for (uint32_t c = 0; c < header->ncmds; c++) {
+            struct my_load_command *lc = (struct my_load_command *)cur;
+            if (lc->cmd == 0x19) {
+                struct my_segment_command_64 *seg = (struct my_segment_command_64 *)cur;
+                if (strncmp(seg->segname, "__DATA", 6) == 0 || strncmp(seg->segname, "__AUTH", 6) == 0) {
+                    struct my_section_64 *sec = (struct my_section_64 *)(cur + sizeof(struct my_segment_command_64));
+                    for (uint32_t s = 0; s < seg->nsects; s++) {
+                        uint8_t secType = sec[s].flags & 0xff;
+                        BOOL isPtrSec = (secType == 0x6 || secType == 0x7 || strstr(sec[s].sectname, "got") || strstr(sec[s].sectname, "symbol_ptr"));
+                        if (isPtrSec && sec[s].size > 0) {
+                            uintptr_t addr = (uintptr_t)(sec[s].addr + slide);
+                            uintptr_t size = (uintptr_t)sec[s].size;
+                            if (vm_protect(mach_task_self_, addr, size, 0, 19) == 0) {
+                                void **ptrs = (void **)addr;
+                                uintptr_t num = size / sizeof(void *);
+                                for (uintptr_t k = 0; k < num; k++) {
+                                    uintptr_t curPtr = ((uintptr_t)ptrs[k]) & 0x0000007fffffffffULL;
+                                    if (curPtr == origAddr) {
+                                        ptrs[k] = hookFunc;
+                                        continue;
+                                    }
+                                    if (symtab && strtab && indirect_symtab && (sec[s].reserved1 + k < dysymtab_cmd->nindirectsyms)) {
+                                        uint32_t symIdx = indirect_symtab[sec[s].reserved1 + k];
+                                        if (symIdx < symtab_cmd->nsyms) {
+                                            const char *symName = strtab + symtab[symIdx].n_strx;
+                                            if (strcmp(symName, "_AudioUnitRender") == 0) {
+                                                ptrs[k] = hookFunc;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            cur += lc->cmdsize;
+        }
     }
-
-    int wp = 0;
-    float lp = 0.0f;
-    for (int i = 0; i < totalSamples; i++) {
-        float x = (i < gTestRecordCount) ? ((float)gTestRecordBuffer[i] / 32768.0f) : 0.0f;
-        float y = applyWarSingleSample(x, tempEcho, &wp, &lp);
-        outPcm[i] = (int16_t)(y * 32767.0f);
-    }
-
-    uint32_t dataSize = (uint32_t)(totalSamples * 2);
-    uint32_t chunkSize = 36 + dataSize;
-    uint32_t sampleRate = 48000;
-    uint32_t byteRate = sampleRate * 2;
-    uint16_t blockAlign = 2;
-    uint16_t bitsPerSample = 16;
-    uint16_t audioFormat = 1;
-    uint16_t numChannels = 1;
-    uint32_t subchunk1Size = 16;
-
-    NSMutableData *wav = [NSMutableData dataWithCapacity:44 + dataSize];
-    [wav appendBytes:"RIFF" length:4];
-    [wav appendBytes:&chunkSize length:4];
-    [wav appendBytes:"WAVE" length:4];
-    [wav appendBytes:"fmt " length:4];
-    [wav appendBytes:&subchunk1Size length:4];
-    [wav appendBytes:&audioFormat length:2];
-    [wav appendBytes:&numChannels length:2];
-    [wav appendBytes:&sampleRate length:4];
-    [wav appendBytes:&byteRate length:4];
-    [wav appendBytes:&blockAlign length:2];
-    [wav appendBytes:&bitsPerSample length:2];
-    [wav appendBytes:"data" length:4];
-    [wav appendBytes:&dataSize length:4];
-    [wav appendBytes:outPcm length:dataSize];
-
-    free(outPcm);
-    free(tempEcho);
-    return wav;
 }
 
-@interface DiscordMenu : NSObject <UIGestureRecognizerDelegate, AVAudioPlayerDelegate>
+@interface DiscordMenu : NSObject <UIGestureRecognizerDelegate>
 @property (nonatomic, strong) UIView *box;
 @property (nonatomic, strong) UIButton *collapsedMicBtn;
 @property (nonatomic, strong) UIImageView *collapsedMicIcon;
@@ -176,19 +287,9 @@ static NSData *buildProcessedWavData(void) {
 @property (nonatomic, strong) UILabel *nganLabel;
 @property (nonatomic, strong) UISwitch *nganSwitch;
 @property (nonatomic, strong) UIButton *btnBass;
-@property (nonatomic, strong) UISlider *verticalSlider;
-@property (nonatomic, strong) UILabel *sliderValueLabel;
-@property (nonatomic, strong) UIView *testMicBox;
-@property (nonatomic, strong) UILabel *testMicLabel;
-@property (nonatomic, strong) NSMutableArray<UIView *> *waveBars;
-@property (nonatomic, strong) UIButton *recBtn;
-@property (nonatomic, strong) UIButton *playBtn;
-@property (nonatomic, strong) AVAudioRecorder *backupRecorder;
-@property (nonatomic, strong) AVAudioPlayer *testPlayer;
+@property (nonatomic, strong) UISlider *bottomSlider;
 @property (nonatomic, strong) NSMutableArray<UIView *> *emptySlots;
 @property (nonatomic, strong) NSMutableArray<UILabel *> *emptyLabels;
-@property (nonatomic, assign) CGFloat hue;
-@property (nonatomic, assign) CGFloat wavePhase;
 @property (nonatomic, assign) BOOL isExpanded;
 @property (nonatomic, assign) BOOL isSoundOpen;
 @property (nonatomic, assign) int selectedParam;
@@ -197,15 +298,12 @@ static NSData *buildProcessedWavData(void) {
 - (void)layoutMenuAnimated:(BOOL)animated;
 - (void)updateParamTitles;
 - (void)checkMic;
-- (void)updateColor;
 - (void)onToggleExpand;
 - (void)onToggleSoundPanel;
 - (void)onEchoSwitch:(UISwitch *)sender;
 - (void)onNganSwitch:(UISwitch *)sender;
 - (void)onSelectSliderParam:(UIButton *)sender;
-- (void)onVerticalSliderChanged:(UISlider *)sender;
-- (void)onTapRecordTest;
-- (void)onTapPlayTest;
+- (void)onBottomSliderChanged:(UISlider *)sender;
 - (void)drag:(UIPanGestureRecognizer *)pan;
 @end
 
@@ -221,6 +319,8 @@ static NSData *buildProcessedWavData(void) {
 }
 
 - (void)setup {
+    hookGotPointers();
+
     UIWindow *win = nil;
     for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (scene.activationState == UISceneActivationStateForegroundActive) {
@@ -237,112 +337,129 @@ static NSData *buildProcessedWavData(void) {
     }
     if (!win) return;
 
-    self.hue = 0.0;
-    self.wavePhase = 0.0;
     self.isExpanded = NO;
     self.isSoundOpen = NO;
     self.selectedParam = 1;
-    self.waveBars = [NSMutableArray array];
     self.emptySlots = [NSMutableArray array];
     self.emptyLabels = [NSMutableArray array];
 
-    self.box = [[UIView alloc] initWithFrame:CGRectMake(50, 130, 60, 60)];
-    self.box.backgroundColor = [UIColor colorWithRed:0.08 green:0.09 blue:0.11 alpha:0.96];
-    self.box.layer.cornerRadius = 16.0;
+    UIColor *bgDark = [UIColor colorWithRed:0.10 green:0.11 blue:0.13 alpha:0.96];
+    UIColor *slotBg = [UIColor colorWithRed:0.15 green:0.16 blue:0.19 alpha:1.0];
+    UIColor *borderBasic = [UIColor colorWithRed:0.26 green:0.28 blue:0.33 alpha:1.0];
+    UIColor *accentColor = [UIColor colorWithRed:0.35 green:0.55 blue:0.95 alpha:1.0];
+    UIColor *textMain = [UIColor colorWithWhite:0.92 alpha:1.0];
+    UIColor *textSub = [UIColor colorWithWhite:0.60 alpha:1.0];
+
+    self.box = [[UIView alloc] initWithFrame:CGRectMake(50, 140, 46, 46)];
+    self.box.backgroundColor = bgDark;
+    self.box.layer.cornerRadius = 12.0;
     self.box.layer.masksToBounds = YES;
-    self.box.layer.borderWidth = 2.2;
+    self.box.layer.borderWidth = 1.2;
+    self.box.layer.borderColor = borderBasic.CGColor;
     self.box.layer.zPosition = 9999;
     self.box.hidden = YES;
 
-    self.collapsedMicBtn = [[UIButton alloc] initWithFrame:CGRectMake(0, 0, 60, 60)];
+    self.collapsedMicBtn = [[UIButton alloc] initWithFrame:CGRectMake(0, 0, 46, 46)];
     [self.collapsedMicBtn addTarget:self action:@selector(onToggleExpand) forControlEvents:UIControlEventTouchUpInside];
     [self.box addSubview:self.collapsedMicBtn];
 
-    UIImageSymbolConfiguration *micCfg = [UIImageSymbolConfiguration configurationWithPointSize:26 weight:UIImageSymbolWeightBold];
+    UIImageSymbolConfiguration *micCfg = [UIImageSymbolConfiguration configurationWithPointSize:20 weight:UIImageSymbolWeightMedium];
     UIImage *micImg = [UIImage systemImageNamed:@"mic.fill" withConfiguration:micCfg];
     self.collapsedMicIcon = [[UIImageView alloc] initWithImage:micImg];
-    self.collapsedMicIcon.frame = CGRectMake(13, 13, 34, 34);
+    self.collapsedMicIcon.frame = CGRectMake(11, 11, 24, 24);
     self.collapsedMicIcon.contentMode = UIViewContentModeScaleAspectFit;
+    self.collapsedMicIcon.tintColor = textMain;
     self.collapsedMicIcon.userInteractionEnabled = NO;
     [self.collapsedMicBtn addSubview:self.collapsedMicIcon];
 
-    self.mainContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 226, 300)];
+    self.mainContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 196, 260)];
     self.mainContainer.alpha = 0.0;
     [self.box addSubview:self.mainContainer];
 
-    self.slot1 = [[UIView alloc] initWithFrame:CGRectMake(8, 8, 210, 34)];
-    self.slot1.backgroundColor = [UIColor colorWithRed:0.14 green:0.15 blue:0.18 alpha:1.0];
-    self.slot1.layer.cornerRadius = 8.0;
-    self.slot1.layer.borderWidth = 1.2;
+    self.slot1 = [[UIView alloc] initWithFrame:CGRectMake(8, 8, 180, 28)];
+    self.slot1.backgroundColor = slotBg;
+    self.slot1.layer.cornerRadius = 6.0;
+    self.slot1.layer.borderWidth = 0.8;
+    self.slot1.layer.borderColor = borderBasic.CGColor;
     [self.mainContainer addSubview:self.slot1];
 
     self.headerMicIcon = [[UIImageView alloc] initWithImage:micImg];
-    self.headerMicIcon.frame = CGRectMake(10, 7, 20, 20);
+    self.headerMicIcon.frame = CGRectMake(8, 6, 16, 16);
     self.headerMicIcon.contentMode = UIViewContentModeScaleAspectFit;
+    self.headerMicIcon.tintColor = textMain;
     [self.slot1 addSubview:self.headerMicIcon];
 
-    self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(35, 2, 140, 30)];
+    self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(30, 0, 120, 28)];
     self.titleLabel.text = @"MENU";
+    self.titleLabel.textColor = textMain;
     self.titleLabel.textAlignment = NSTextAlignmentCenter;
-    self.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightHeavy];
+    self.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
     [self.slot1 addSubview:self.titleLabel];
 
-    UIButton *closeHeaderBtn = [[UIButton alloc] initWithFrame:CGRectMake(0, 0, 210, 34)];
+    UIButton *closeHeaderBtn = [[UIButton alloc] initWithFrame:CGRectMake(0, 0, 180, 28)];
     [closeHeaderBtn addTarget:self action:@selector(onToggleExpand) forControlEvents:UIControlEventTouchUpInside];
     [self.slot1 addSubview:closeHeaderBtn];
 
-    self.slot2 = [[UIView alloc] initWithFrame:CGRectMake(8, 47, 210, 46)];
-    self.slot2.backgroundColor = [UIColor colorWithRed:0.14 green:0.15 blue:0.18 alpha:1.0];
-    self.slot2.layer.cornerRadius = 8.0;
-    self.slot2.layer.borderWidth = 1.2;
+    self.slot2 = [[UIView alloc] initWithFrame:CGRectMake(8, 41, 180, 40)];
+    self.slot2.backgroundColor = slotBg;
+    self.slot2.layer.cornerRadius = 6.0;
+    self.slot2.layer.borderWidth = 0.8;
+    self.slot2.layer.borderColor = borderBasic.CGColor;
     [self.mainContainer addSubview:self.slot2];
 
-    self.echoTitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 5, 120, 24)];
+    self.echoTitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 4, 110, 20)];
     self.echoTitleLabel.text = @"Giọng Vang";
-    self.echoTitleLabel.font = [UIFont boldSystemFontOfSize:14];
+    self.echoTitleLabel.textColor = textMain;
+    self.echoTitleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
     [self.slot2 addSubview:self.echoTitleLabel];
 
-    self.echoSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(150, 2, 51, 31)];
-    self.echoSwitch.transform = CGAffineTransformMakeScale(0.75, 0.75);
+    self.echoSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(126, 0, 51, 31)];
+    self.echoSwitch.transform = CGAffineTransformMakeScale(0.68, 0.68);
     self.echoSwitch.on = NO;
+    self.echoSwitch.onTintColor = accentColor;
     [self.echoSwitch addTarget:self action:@selector(onEchoSwitch:) forControlEvents:UIControlEventValueChanged];
     [self.slot2 addSubview:self.echoSwitch];
 
-    UIImageSymbolConfiguration *arrowCfg = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightBold];
+    UIImageSymbolConfiguration *arrowCfg = [UIImageSymbolConfiguration configurationWithPointSize:10 weight:UIImageSymbolWeightBold];
     UIImage *arrowImg = [UIImage systemImageNamed:@"chevron.down" withConfiguration:arrowCfg];
     self.arrowIcon = [[UIImageView alloc] initWithImage:arrowImg];
-    self.arrowIcon.frame = CGRectMake(98, 31, 14, 13);
+    self.arrowIcon.frame = CGRectMake(84, 27, 12, 11);
     self.arrowIcon.contentMode = UIViewContentModeScaleAspectFit;
+    self.arrowIcon.tintColor = textSub;
     [self.slot2 addSubview:self.arrowIcon];
 
-    UIButton *arrowBtn = [[UIButton alloc] initWithFrame:CGRectMake(0, 0, 145, 46)];
+    UIButton *arrowBtn = [[UIButton alloc] initWithFrame:CGRectMake(0, 0, 125, 40)];
     [arrowBtn addTarget:self action:@selector(onToggleSoundPanel) forControlEvents:UIControlEventTouchUpInside];
     [self.slot2 addSubview:arrowBtn];
 
-    UIButton *bottomArrowBtn = [[UIButton alloc] initWithFrame:CGRectMake(60, 26, 90, 20)];
+    UIButton *bottomArrowBtn = [[UIButton alloc] initWithFrame:CGRectMake(50, 22, 80, 18)];
     [bottomArrowBtn addTarget:self action:@selector(onToggleSoundPanel) forControlEvents:UIControlEventTouchUpInside];
     [self.slot2 addSubview:bottomArrowBtn];
 
-    self.soundPanel = [[UIView alloc] initWithFrame:CGRectMake(8, 98, 210, 192)];
-    self.soundPanel.backgroundColor = [UIColor colorWithRed:0.11 green:0.12 blue:0.15 alpha:1.0];
-    self.soundPanel.layer.cornerRadius = 8.0;
-    self.soundPanel.layer.borderWidth = 1.2;
+    self.soundPanel = [[UIView alloc] initWithFrame:CGRectMake(8, 86, 180, 162)];
+    self.soundPanel.backgroundColor = [UIColor colorWithRed:0.12 green:0.13 blue:0.15 alpha:1.0];
+    self.soundPanel.layer.cornerRadius = 6.0;
+    self.soundPanel.layer.borderWidth = 0.8;
+    self.soundPanel.layer.borderColor = borderBasic.CGColor;
     self.soundPanel.layer.masksToBounds = YES;
     self.soundPanel.alpha = 0.0;
     [self.mainContainer addSubview:self.soundPanel];
 
-    self.soundHeaderLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 4, 210, 16)];
-    self.soundHeaderLabel.text = @"CHỈNH ÂM THANH";
+    self.soundHeaderLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 4, 180, 14)];
+    self.soundHeaderLabel.text = @"Chỉnh Âm Thanh";
+    self.soundHeaderLabel.textColor = textSub;
     self.soundHeaderLabel.textAlignment = NSTextAlignmentCenter;
-    self.soundHeaderLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightHeavy];
+    self.soundHeaderLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
     [self.soundPanel addSubview:self.soundHeaderLabel];
 
     self.btnVang = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.btnVang.frame = CGRectMake(8, 23, 142, 28);
-    self.btnVang.backgroundColor = [UIColor colorWithRed:0.16 green:0.17 blue:0.21 alpha:1.0];
-    self.btnVang.layer.cornerRadius = 6.0;
-    self.btnVang.layer.borderWidth = 2.0;
-    self.btnVang.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+    self.btnVang.frame = CGRectMake(8, 21, 164, 24);
+    self.btnVang.backgroundColor = slotBg;
+    self.btnVang.layer.cornerRadius = 5.0;
+    self.btnVang.layer.borderWidth = 1.2;
+    self.btnVang.layer.borderColor = accentColor.CGColor;
+    self.btnVang.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+    [self.btnVang setTitleColor:textMain forState:UIControlStateNormal];
     self.btnVang.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
     self.btnVang.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, 0);
     self.btnVang.tag = 1;
@@ -350,113 +467,72 @@ static NSData *buildProcessedWavData(void) {
     [self.soundPanel addSubview:self.btnVang];
 
     self.btnGain = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.btnGain.frame = CGRectMake(8, 55, 142, 28);
-    self.btnGain.backgroundColor = [UIColor colorWithRed:0.16 green:0.17 blue:0.21 alpha:1.0];
-    self.btnGain.layer.cornerRadius = 6.0;
-    self.btnGain.layer.borderWidth = 0.7;
-    self.btnGain.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+    self.btnGain.frame = CGRectMake(8, 49, 164, 24);
+    self.btnGain.backgroundColor = slotBg;
+    self.btnGain.layer.cornerRadius = 5.0;
+    self.btnGain.layer.borderWidth = 0.6;
+    self.btnGain.layer.borderColor = borderBasic.CGColor;
+    self.btnGain.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+    [self.btnGain setTitleColor:textMain forState:UIControlStateNormal];
     self.btnGain.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
     self.btnGain.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, 0);
     self.btnGain.tag = 2;
     [self.btnGain addTarget:self action:@selector(onSelectSliderParam:) forControlEvents:UIControlEventTouchUpInside];
     [self.soundPanel addSubview:self.btnGain];
 
-    self.nganRowBox = [[UIView alloc] initWithFrame:CGRectMake(8, 87, 142, 28)];
-    self.nganRowBox.backgroundColor = [UIColor colorWithRed:0.16 green:0.17 blue:0.21 alpha:1.0];
-    self.nganRowBox.layer.cornerRadius = 6.0;
-    self.nganRowBox.layer.borderWidth = 0.7;
+    self.nganRowBox = [[UIView alloc] initWithFrame:CGRectMake(8, 77, 164, 24)];
+    self.nganRowBox.backgroundColor = slotBg;
+    self.nganRowBox.layer.cornerRadius = 5.0;
+    self.nganRowBox.layer.borderWidth = 0.6;
+    self.nganRowBox.layer.borderColor = borderBasic.CGColor;
     [self.soundPanel addSubview:self.nganRowBox];
 
-    self.nganLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 0, 85, 28)];
+    self.nganLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 0, 100, 24)];
     self.nganLabel.text = @"3. Độ Ngân";
-    self.nganLabel.font = [UIFont boldSystemFontOfSize:11];
+    self.nganLabel.textColor = textMain;
+    self.nganLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
     [self.nganRowBox addSubview:self.nganLabel];
 
-    self.nganSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(92, -1, 51, 31)];
-    self.nganSwitch.transform = CGAffineTransformMakeScale(0.62, 0.62);
+    self.nganSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(114, -3, 51, 31)];
+    self.nganSwitch.transform = CGAffineTransformMakeScale(0.58, 0.58);
     self.nganSwitch.on = YES;
+    self.nganSwitch.onTintColor = accentColor;
     [self.nganSwitch addTarget:self action:@selector(onNganSwitch:) forControlEvents:UIControlEventValueChanged];
     [self.nganRowBox addSubview:self.nganSwitch];
 
     self.btnBass = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.btnBass.frame = CGRectMake(8, 119, 142, 28);
-    self.btnBass.backgroundColor = [UIColor colorWithRed:0.16 green:0.17 blue:0.21 alpha:1.0];
-    self.btnBass.layer.cornerRadius = 6.0;
-    self.btnBass.layer.borderWidth = 0.7;
-    self.btnBass.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+    self.btnBass.frame = CGRectMake(8, 105, 164, 24);
+    self.btnBass.backgroundColor = slotBg;
+    self.btnBass.layer.cornerRadius = 5.0;
+    self.btnBass.layer.borderWidth = 0.6;
+    self.btnBass.layer.borderColor = borderBasic.CGColor;
+    self.btnBass.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+    [self.btnBass setTitleColor:textMain forState:UIControlStateNormal];
     self.btnBass.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
     self.btnBass.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, 0);
     self.btnBass.tag = 4;
     [self.btnBass addTarget:self action:@selector(onSelectSliderParam:) forControlEvents:UIControlEventTouchUpInside];
     [self.soundPanel addSubview:self.btnBass];
 
-    self.sliderValueLabel = [[UILabel alloc] initWithFrame:CGRectMake(150, 22, 56, 16)];
-    self.sliderValueLabel.textAlignment = NSTextAlignmentCenter;
-    self.sliderValueLabel.font = [UIFont boldSystemFontOfSize:10];
-    [self.soundPanel addSubview:self.sliderValueLabel];
-
-    self.verticalSlider = [[UISlider alloc] initWithFrame:CGRectMake(0, 0, 106, 28)];
-    self.verticalSlider.minimumValue = 0.0f;
-    self.verticalSlider.maximumValue = 1.0f;
-    self.verticalSlider.value = gParamEcho;
-    self.verticalSlider.transform = CGAffineTransformMakeRotation(-1.5707963f);
-    self.verticalSlider.center = CGPointMake(179, 93);
-    [self.verticalSlider addTarget:self action:@selector(onVerticalSliderChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.soundPanel addSubview:self.verticalSlider];
-
-    self.testMicBox = [[UIView alloc] initWithFrame:CGRectMake(8, 152, 194, 34)];
-    self.testMicBox.backgroundColor = [UIColor colorWithRed:0.15 green:0.16 blue:0.20 alpha:1.0];
-    self.testMicBox.layer.cornerRadius = 7.0;
-    self.testMicBox.layer.borderWidth = 1.0;
-    [self.soundPanel addSubview:self.testMicBox];
-
-    self.testMicLabel = [[UILabel alloc] initWithFrame:CGRectMake(7, 0, 52, 34)];
-    self.testMicLabel.text = @"Thử Mic";
-    self.testMicLabel.font = [UIFont boldSystemFontOfSize:11];
-    [self.testMicBox addSubview:self.testMicLabel];
-
-    for (int i = 0; i < 6; i++) {
-        UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(61 + i * 5, 15, 3, 4)];
-        bar.layer.cornerRadius = 1.5;
-        [self.testMicBox addSubview:bar];
-        [self.waveBars addObject:bar];
-    }
-
-    UIImageSymbolConfiguration *btnSymCfg = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightBold];
-    UIImage *recImg = [UIImage systemImageNamed:@"mic.circle.fill" withConfiguration:btnSymCfg];
-    self.recBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.recBtn.frame = CGRectMake(94, 4, 48, 26);
-    self.recBtn.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
-    self.recBtn.layer.cornerRadius = 6.0;
-    self.recBtn.layer.borderWidth = 1.0;
-    [self.recBtn setImage:recImg forState:UIControlStateNormal];
-    [self.recBtn setTitle:@" Thu" forState:UIControlStateNormal];
-    self.recBtn.titleLabel.font = [UIFont boldSystemFontOfSize:10];
-    [self.recBtn addTarget:self action:@selector(onTapRecordTest) forControlEvents:UIControlEventTouchUpInside];
-    [self.testMicBox addSubview:self.recBtn];
-
-    UIImage *playImg = [UIImage systemImageNamed:@"play.circle.fill" withConfiguration:btnSymCfg];
-    self.playBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.playBtn.frame = CGRectMake(145, 4, 45, 26);
-    self.playBtn.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
-    self.playBtn.layer.cornerRadius = 6.0;
-    self.playBtn.layer.borderWidth = 1.0;
-    [self.playBtn setImage:playImg forState:UIControlStateNormal];
-    [self.playBtn setTitle:@" Phát" forState:UIControlStateNormal];
-    self.playBtn.titleLabel.font = [UIFont boldSystemFontOfSize:10];
-    self.playBtn.hidden = YES;
-    [self.playBtn addTarget:self action:@selector(onTapPlayTest) forControlEvents:UIControlEventTouchUpInside];
-    [self.testMicBox addSubview:self.playBtn];
+    self.bottomSlider = [[UISlider alloc] initWithFrame:CGRectMake(10, 133, 160, 24)];
+    self.bottomSlider.minimumValue = 0.0f;
+    self.bottomSlider.maximumValue = 1.0f;
+    self.bottomSlider.value = gParamEcho;
+    self.bottomSlider.minimumTrackTintColor = accentColor;
+    [self.bottomSlider addTarget:self action:@selector(onBottomSliderChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.soundPanel addSubview:self.bottomSlider];
 
     for (int i = 0; i < 5; i++) {
-        UIView *slot = [[UIView alloc] initWithFrame:CGRectMake(8, 98 + i * 39, 210, 34)];
-        slot.backgroundColor = [UIColor colorWithRed:0.14 green:0.15 blue:0.18 alpha:1.0];
-        slot.layer.cornerRadius = 8.0;
-        slot.layer.borderWidth = 1.0;
+        UIView *slot = [[UIView alloc] initWithFrame:CGRectMake(8, 86 + i * 33, 180, 28)];
+        slot.backgroundColor = slotBg;
+        slot.layer.cornerRadius = 6.0;
+        slot.layer.borderWidth = 0.8;
+        slot.layer.borderColor = borderBasic.CGColor;
 
-        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(12, 0, 186, 34)];
-        lbl.text = [NSString stringWithFormat:@"Ngăn %d (Chờ thêm...)", i + 3];
-        lbl.font = [UIFont boldSystemFontOfSize:13];
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(10, 0, 160, 28)];
+        lbl.text = [NSString stringWithFormat:@"Ngăn %d", i + 3];
+        lbl.textColor = textSub;
+        lbl.font = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
         [slot addSubview:lbl];
 
         [self.mainContainer addSubview:slot];
@@ -466,23 +542,22 @@ static NSData *buildProcessedWavData(void) {
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
     pan.delegate = self;
+    pan.cancelsTouchesInView = NO;
     [self.box addGestureRecognizer:pan];
 
     [win addSubview:self.box];
 
     [self updateParamTitles];
     [self layoutMenuAnimated:NO];
-    [self updateColor];
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(checkMic) name:AVAudioSessionRouteChangeNotification object:nil];
     [NSTimer scheduledTimerWithTimeInterval:0.25 target:self selector:@selector(checkMic) userInfo:nil repeats:YES];
-    [NSTimer scheduledTimerWithTimeInterval:0.04 target:self selector:@selector(updateColor) userInfo:nil repeats:YES];
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
     UIView *v = touch.view;
     while (v && v != self.box) {
-        if ([v isKindOfClass:[UISlider class]] || [v isKindOfClass:[UISwitch class]] || [v isKindOfClass:[UIButton class]]) {
+        if ([v isKindOfClass:[UISlider class]] || [v isKindOfClass:[UISwitch class]]) {
             return NO;
         }
         v = v.superview;
@@ -498,14 +573,10 @@ static NSData *buildProcessedWavData(void) {
     [self.btnVang setTitle:[NSString stringWithFormat:@"1. Độ Vang: %d%%", vangPct] forState:UIControlStateNormal];
     [self.btnGain setTitle:[NSString stringWithFormat:@"2. Khuếch Đại: %d%%", gainPct] forState:UIControlStateNormal];
     [self.btnBass setTitle:[NSString stringWithFormat:@"4. Bass: %d%%", bassPct] forState:UIControlStateNormal];
-
-    int curPct = vangPct;
-    if (self.selectedParam == 2) curPct = gainPct;
-    if (self.selectedParam == 4) curPct = bassPct;
-    self.sliderValueLabel.text = [NSString stringWithFormat:@"%d%%", curPct];
 }
 
 - (void)onEchoSwitch:(UISwitch *)sender {
+    hookGotPointers();
     gEchoEnabled = sender.isOn;
 }
 
@@ -515,107 +586,30 @@ static NSData *buildProcessedWavData(void) {
 
 - (void)onSelectSliderParam:(UIButton *)sender {
     self.selectedParam = (int)sender.tag;
-    if (self.selectedParam == 1) self.verticalSlider.value = gParamEcho;
-    if (self.selectedParam == 2) self.verticalSlider.value = gParamGain;
-    if (self.selectedParam == 4) self.verticalSlider.value = gParamBass;
+    if (self.selectedParam == 1) self.bottomSlider.value = gParamEcho;
+    if (self.selectedParam == 2) self.bottomSlider.value = gParamGain;
+    if (self.selectedParam == 4) self.bottomSlider.value = gParamBass;
 
-    self.btnVang.layer.borderWidth = (self.selectedParam == 1) ? 2.0 : 0.7;
-    self.btnGain.layer.borderWidth = (self.selectedParam == 2) ? 2.0 : 0.7;
-    self.btnBass.layer.borderWidth = (self.selectedParam == 4) ? 2.0 : 0.7;
+    UIColor *borderBasic = [UIColor colorWithRed:0.26 green:0.28 blue:0.33 alpha:1.0];
+    UIColor *accentColor = [UIColor colorWithRed:0.35 green:0.55 blue:0.95 alpha:1.0];
+
+    self.btnVang.layer.borderWidth = (self.selectedParam == 1) ? 1.2 : 0.6;
+    self.btnVang.layer.borderColor = (self.selectedParam == 1) ? accentColor.CGColor : borderBasic.CGColor;
+
+    self.btnGain.layer.borderWidth = (self.selectedParam == 2) ? 1.2 : 0.6;
+    self.btnGain.layer.borderColor = (self.selectedParam == 2) ? accentColor.CGColor : borderBasic.CGColor;
+
+    self.btnBass.layer.borderWidth = (self.selectedParam == 4) ? 1.2 : 0.6;
+    self.btnBass.layer.borderColor = (self.selectedParam == 4) ? accentColor.CGColor : borderBasic.CGColor;
 
     [self updateParamTitles];
 }
 
-- (void)onVerticalSliderChanged:(UISlider *)sender {
+- (void)onBottomSliderChanged:(UISlider *)sender {
     if (self.selectedParam == 1) gParamEcho = sender.value;
     if (self.selectedParam == 2) gParamGain = sender.value;
     if (self.selectedParam == 4) gParamBass = sender.value;
     [self updateParamTitles];
-}
-
-- (void)onTapRecordTest {
-    UIImageSymbolConfiguration *btnSymCfg = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightBold];
-    if (!gIsRecordingTest) {
-        if (self.testPlayer && self.testPlayer.isPlaying) {
-            [self.testPlayer stop];
-        }
-        gTestRecordCount = 0;
-        gIsRecordingTest = YES;
-        self.playBtn.hidden = YES;
-
-        NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"test_war_mic.wav"];
-        NSURL *url = [NSURL fileURLWithPath:tempPath];
-        NSDictionary *settings = @{
-            AVFormatIDKey: @(kAudioFormatLinearPCM),
-            AVSampleRateKey: @(48000.0),
-            AVNumberOfChannelsKey: @(1),
-            AVLinearPCMBitDepthKey: @(16),
-            AVLinearPCMIsBigEndianKey: @(NO),
-            AVLinearPCMIsFloatKey: @(NO)
-        };
-        self.backupRecorder = [[AVAudioRecorder alloc] initWithURL:url settings:settings error:nil];
-        [self.backupRecorder prepareToRecord];
-        [self.backupRecorder record];
-
-        UIImage *stopImg = [UIImage systemImageNamed:@"stop.circle.fill" withConfiguration:btnSymCfg];
-        [self.recBtn setImage:stopImg forState:UIControlStateNormal];
-        [self.recBtn setTitle:@" Ngừng" forState:UIControlStateNormal];
-    } else {
-        gIsRecordingTest = NO;
-        if (self.backupRecorder) {
-            [self.backupRecorder stop];
-            if (gTestRecordCount < 2400) {
-                NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"test_war_mic.wav"];
-                NSData *rawFile = [NSData dataWithContentsOfFile:tempPath];
-                if (rawFile && rawFile.length > 44) {
-                    int numSamples = (int)((rawFile.length - 44) / 2);
-                    if (numSamples > 480000) numSamples = 480000;
-                    memcpy(gTestRecordBuffer, (const char *)rawFile.bytes + 44, numSamples * 2);
-                    gTestRecordCount = numSamples;
-                }
-            }
-            self.backupRecorder = nil;
-        }
-
-        UIImage *recImg = [UIImage systemImageNamed:@"mic.circle.fill" withConfiguration:btnSymCfg];
-        [self.recBtn setImage:recImg forState:UIControlStateNormal];
-        [self.recBtn setTitle:@" Thu" forState:UIControlStateNormal];
-
-        if (gTestRecordCount > 0) {
-            self.playBtn.hidden = NO;
-        }
-    }
-}
-
-- (void)onTapPlayTest {
-    UIImageSymbolConfiguration *btnSymCfg = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightBold];
-    if (self.testPlayer && self.testPlayer.isPlaying) {
-        [self.testPlayer stop];
-        UIImage *playImg = [UIImage systemImageNamed:@"play.circle.fill" withConfiguration:btnSymCfg];
-        [self.playBtn setImage:playImg forState:UIControlStateNormal];
-        [self.playBtn setTitle:@" Phát" forState:UIControlStateNormal];
-        return;
-    }
-
-    NSData *wavData = buildProcessedWavData();
-    if (!wavData) return;
-
-    self.testPlayer = [[AVAudioPlayer alloc] initWithData:wavData error:nil];
-    self.testPlayer.delegate = self;
-    self.testPlayer.volume = 1.0f;
-    [self.testPlayer prepareToPlay];
-    [self.testPlayer play];
-
-    UIImage *stopImg = [UIImage systemImageNamed:@"pause.circle.fill" withConfiguration:btnSymCfg];
-    [self.playBtn setImage:stopImg forState:UIControlStateNormal];
-    [self.playBtn setTitle:@" Dừng" forState:UIControlStateNormal];
-}
-
-- (void)audioPlayerDidFinishPlaying:(AVAudioPlayer *)player successfully:(BOOL)flag {
-    UIImageSymbolConfiguration *btnSymCfg = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightBold];
-    UIImage *playImg = [UIImage systemImageNamed:@"play.circle.fill" withConfiguration:btnSymCfg];
-    [self.playBtn setImage:playImg forState:UIControlStateNormal];
-    [self.playBtn setTitle:@" Phát" forState:UIControlStateNormal];
 }
 
 - (void)onToggleExpand {
@@ -625,7 +619,7 @@ static NSData *buildProcessedWavData(void) {
 
 - (void)onToggleSoundPanel {
     self.isSoundOpen = !self.isSoundOpen;
-    UIImageSymbolConfiguration *arrowCfg = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightBold];
+    UIImageSymbolConfiguration *arrowCfg = [UIImageSymbolConfiguration configurationWithPointSize:10 weight:UIImageSymbolWeightBold];
     NSString *sym = self.isSoundOpen ? @"chevron.up" : @"chevron.down";
     self.arrowIcon.image = [UIImage systemImageNamed:sym withConfiguration:arrowCfg];
     [self layoutMenuAnimated:YES];
@@ -635,121 +629,40 @@ static NSData *buildProcessedWavData(void) {
     CGPoint currentCenter = self.box.center;
     void (^applyLayout)(void) = ^{
         if (!self.isExpanded) {
-            self.box.bounds = CGRectMake(0, 0, 60, 60);
+            self.box.bounds = CGRectMake(0, 0, 46, 46);
             self.box.center = currentCenter;
-            self.box.layer.cornerRadius = 16.0;
+            self.box.layer.cornerRadius = 12.0;
             self.collapsedMicBtn.alpha = 1.0;
             self.mainContainer.alpha = 0.0;
         } else {
-            CGFloat y = 98.0;
+            CGFloat y = 86.0;
             if (self.isSoundOpen) {
-                self.soundPanel.frame = CGRectMake(8, 98, 210, 192);
+                self.soundPanel.frame = CGRectMake(8, 86, 180, 162);
                 self.soundPanel.alpha = 1.0;
-                y = 295.0;
+                y = 253.0;
             } else {
-                self.soundPanel.frame = CGRectMake(8, 98, 210, 0);
+                self.soundPanel.frame = CGRectMake(8, 86, 180, 0);
                 self.soundPanel.alpha = 0.0;
             }
             for (int i = 0; i < 5; i++) {
                 UIView *slot = self.emptySlots[i];
-                slot.frame = CGRectMake(8, y, 210, 34);
-                y += 39.0;
+                slot.frame = CGRectMake(8, y, 180, 28);
+                y += 33.0;
             }
             CGFloat totalH = y + 3.0;
-            self.mainContainer.frame = CGRectMake(0, 0, 226, totalH);
-            self.box.bounds = CGRectMake(0, 0, 226, totalH);
+            self.mainContainer.frame = CGRectMake(0, 0, 196, totalH);
+            self.box.bounds = CGRectMake(0, 0, 196, totalH);
             self.box.center = currentCenter;
-            self.box.layer.cornerRadius = 18.0;
+            self.box.layer.cornerRadius = 14.0;
             self.collapsedMicBtn.alpha = 0.0;
             self.mainContainer.alpha = 1.0;
         }
     };
 
     if (animated) {
-        [UIView animateWithDuration:0.25 animations:applyLayout];
+        [UIView animateWithDuration:0.22 animations:applyLayout];
     } else {
         applyLayout();
-    }
-}
-
-- (void)updateColor {
-    self.hue += 0.01;
-    if (self.hue > 1.0) {
-        self.hue = 0.0;
-    }
-    self.wavePhase += 0.35;
-
-    CGFloat h2 = self.hue + 0.15;
-    if (h2 > 1.0) h2 -= 1.0;
-    CGFloat h3 = self.hue + 0.32;
-    if (h3 > 1.0) h3 -= 1.0;
-    CGFloat h4 = self.hue + 0.50;
-    if (h4 > 1.0) h4 -= 1.0;
-
-    UIColor *rgb1 = [UIColor colorWithHue:self.hue saturation:0.88 brightness:1.0 alpha:1.0];
-    UIColor *rgb2 = [UIColor colorWithHue:h2 saturation:0.88 brightness:1.0 alpha:1.0];
-    UIColor *rgb3 = [UIColor colorWithHue:h3 saturation:0.88 brightness:1.0 alpha:1.0];
-    UIColor *rgb4 = [UIColor colorWithHue:h4 saturation:0.88 brightness:1.0 alpha:1.0];
-
-    self.box.layer.borderColor = rgb1.CGColor;
-    self.collapsedMicIcon.tintColor = rgb1;
-    self.headerMicIcon.tintColor = rgb1;
-    self.titleLabel.textColor = rgb1;
-    self.slot1.layer.borderColor = rgb1.CGColor;
-
-    self.slot2.layer.borderColor = rgb2.CGColor;
-    self.echoTitleLabel.textColor = rgb2;
-    self.arrowIcon.tintColor = rgb2;
-    self.echoSwitch.onTintColor = rgb1;
-
-    self.soundPanel.layer.borderColor = rgb1.CGColor;
-    self.soundHeaderLabel.textColor = rgb3;
-    self.verticalSlider.minimumTrackTintColor = rgb1;
-    self.sliderValueLabel.textColor = rgb2;
-
-    [self.btnVang setTitleColor:rgb1 forState:UIControlStateNormal];
-    self.btnVang.layer.borderColor = (self.selectedParam == 1) ? rgb1.CGColor : rgb3.CGColor;
-
-    [self.btnGain setTitleColor:rgb2 forState:UIControlStateNormal];
-    self.btnGain.layer.borderColor = (self.selectedParam == 2) ? rgb2.CGColor : rgb3.CGColor;
-
-    self.nganRowBox.layer.borderColor = rgb3.CGColor;
-    self.nganLabel.textColor = rgb3;
-    self.nganSwitch.onTintColor = rgb3;
-
-    [self.btnBass setTitleColor:rgb4 forState:UIControlStateNormal];
-    self.btnBass.layer.borderColor = (self.selectedParam == 4) ? rgb4.CGColor : rgb3.CGColor;
-
-    self.testMicBox.layer.borderColor = rgb2.CGColor;
-    self.testMicLabel.textColor = rgb1;
-
-    [self.recBtn setTitleColor:rgb2 forState:UIControlStateNormal];
-    self.recBtn.tintColor = rgb2;
-    self.recBtn.layer.borderColor = rgb2.CGColor;
-
-    [self.playBtn setTitleColor:rgb4 forState:UIControlStateNormal];
-    self.playBtn.tintColor = rgb4;
-    self.playBtn.layer.borderColor = rgb4.CGColor;
-
-    BOOL activeWave = gIsRecordingTest || (self.testPlayer && self.testPlayer.isPlaying);
-    for (int i = 0; i < 6; i++) {
-        UIView *bar = self.waveBars[i];
-        CGFloat bh = 4.0;
-        if (activeWave) {
-            CGFloat s = sin(self.wavePhase + i * 0.9);
-            if (s < 0) s = -s;
-            bh = 4.0 + s * 18.0;
-        }
-        bar.frame = CGRectMake(61 + i * 5, 17.0 - (bh * 0.5), 3.0, bh);
-        bar.backgroundColor = (i % 2 == 0) ? rgb1 : rgb3;
-    }
-
-    for (int i = 0; i < 5; i++) {
-        CGFloat hs = self.hue + (i * 0.12);
-        if (hs > 1.0) hs -= 1.0;
-        UIColor *slotRgb = [UIColor colorWithHue:hs saturation:0.85 brightness:1.0 alpha:1.0];
-        self.emptySlots[i].layer.borderColor = slotRgb.CGColor;
-        self.emptyLabels[i].textColor = slotRgb;
     }
 }
 
@@ -762,6 +675,7 @@ static NSData *buildProcessedWavData(void) {
         BOOL usingMic = isRecordCategory && hasMicInput;
         self.box.hidden = !usingMic;
         if (usingMic) {
+            hookGotPointers();
             [self.box.superview bringSubviewToFront:self.box];
         }
     });
@@ -769,7 +683,7 @@ static NSData *buildProcessedWavData(void) {
 
 - (void)drag:(UIPanGestureRecognizer *)pan {
     CGPoint trans = [pan translationInView:self.box.superview];
-    pan.view.center = CGPointMake(pan.view.center.x + trans.x, pan.view.center.y + trans.y);
+    self.box.center = CGPointMake(self.box.center.x + trans.x, self.box.center.y + trans.y);
     [pan setTranslation:CGPointZero inView:self.box.superview];
 }
 
@@ -777,6 +691,7 @@ static NSData *buildProcessedWavData(void) {
 
 __attribute__((constructor))
 static void startMenu() {
+    hookGotPointers();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[DiscordMenu shared] setup];
     });
