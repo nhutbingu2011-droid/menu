@@ -1,0 +1,16 @@
+name: Build Dylib
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Dylib
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -dynamiclib -fobjc-arc -fmodules -framework UIKit -framework Foundation -framework QuartzCore -framework CoreGraphics -framework AVFoundation -miphoneos-version-min=14.0 Menu.m -o MenuDiscord.dylib
+          codesign -f -s - MenuDiscord.dylib
+      - name: Upload Dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: File-Dylib
+          path: MenuDiscord.dylib
